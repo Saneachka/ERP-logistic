@@ -1,0 +1,258 @@
+asyncapi: 3.0.0
+
+info:
+  title: Order Events Contract (RabbitMQ)
+  version: 1.0.0
+  description: |
+    Контракт событий создания заказов для интеграции через RabbitMQ.
+    
+    ### Механика маршрутизации (Pub/Sub):
+    - **Producer** публикует сообщение в Topic Exchange с ключом маршрутизации order.created.
+    - **Consumers** имеют свои собственные именованные, долговечные (durable) очереди, привязанные к этому Exchange с тем же ключом order.created.
+    - **Гарантия At Least Once:** Сообщения сохраняются на диск (durable), потребители обязаны отправлять ручное подтверждение (manual ACK) только после успешного коммита в свою БД. Необрабатываемые сообщения попадают в Dead Letter Queue (DLQ).
+    
+    ### Участники взаимодействия:
+    - **Producer:** Сервис заказов веб-приложения. Публикует сообщение после успешного сохранения заказа в БД.
+    - **Consumers:**
+      1. CRM система (очередь: queue.crm.order-sync)
+      2. Сервис расчета стоимости ERP (очередь: queue.erp.pricing-calculation)
+
+servers:
+  rabbitmq-prod:
+    host: logistic-rabbitmq.io.ru:5671
+    protocol: amqps
+    description: Основной RabbitMQ-кластер для событий домена заказов (с поддержкой TLS/AMQPS).
+
+channels:
+  # Exchange для публикации
+  orderCreatedExchange:
+    address: orders.exchange
+    description: Topic Exchange для маршрутизации событий о создании новых заказов
+    messages:
+      OrderCreateMessage:
+        $ref: '#/components/messages/OrderCreateMessage'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: orders.exchange
+          type: topic
+          durable: true
+          autoDelete: false
+    x-routing-key: order.created
+
+  # Очередь для CRM
+  crmOrderQueue:
+    address: queue.crm.order-sync
+    description: Очередь CRM системы для получения событий создания заказов
+    messages:
+      OrderCreateMessage:
+        $ref: '#/components/messages/OrderCreateMessage'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: queue.crm.order-sync
+          durable: true
+          exclusive: false
+          autoDelete: false
+    x-routing-key: order.created
+    x-exchange-name: orders.exchange
+
+  # Очередь для Pricing Service
+  pricingOrderQueue:
+    address: queue.erp.pricing-calculation
+    description: Очередь сервиса расчета стоимости для получения событий создания заказов
+    messages:
+      OrderCreateMessage:
+        $ref: '#/components/messages/OrderCreateMessage'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: queue.erp.pricing-calculation
+          durable: true
+          exclusive: false
+          autoDelete: false
+    x-routing-key: order.created
+    x-exchange-name: orders.exchange
+
+operations:
+  # 1. Операция ОТПРАВКИ (Producer)
+  publishOrderCreated:
+    action: send
+    description: Отправка сообщения сервисом заказов веб-приложения после сохранения в БД
+    channel:
+      $ref: '#/channels/orderCreatedExchange'
+    bindings:
+      amqp:
+        deliveryMode: 2
+        timestamp: true
+        ack: true
+
+  # 2. Операция ПОЛУЧЕНИЯ (Consumer 1: CRM)
+  receiveOrderCreatedCRM:
+    action: receive
+    description: Получение сообщения CRM системой из своей выделенной очереди для создания карточки заказа
+    channel:
+      $ref: '#/channels/crmOrderQueue'
+    bindings:
+      amqp:
+        ack: true
+
+  # 3. Операция ПОЛУЧЕНИЯ (Consumer 2: Pricing Service)
+  receiveOrderCreatedPricing:
+    action: receive
+    description: Получение сообщения Сервисом расчета стоимости из своей выделенной очереди для калькуляции
+    channel:
+      $ref: '#/channels/pricingOrderQueue'
+    bindings:
+      amqp:
+        ack: true
+
+components:
+  messages:
+    OrderCreateMessage:
+      name: OrderCreateMessage
+      title: Сообщение о создании заказа
+      contentType: application/json
+      headers:
+        type: object
+        required:
+          - Idempotency-Key
+        properties:
+          Idempotency-Key:
+            type: string
+            format: uuid
+            description: Уникальный ключ идемпотентности (UUID v4). Защищает от дублирования обработки при повторной доставке (At Least Once).
+            example: "123e4567-e89b-12d3-a456-426614174000"
+      payload:
+        type: object
+        required:
+          - Orders
+          - user_id
+        properties:
+          user_id:
+            type: integer
+            description: Уникальный идентификатор пользователя, который создал заказ.
+            example: 123123
+          Orders:
+            type: array
+            description: Массив объектов груза, принадлежащих данному заказу.
+            minItems: 1
+            items:
+              type: object
+              required:
+                - Cargo
+                - Tariff
+                - order_id
+              properties:
+                order_id:
+                  type: integer
+                  description: Уникальный идентификатор заказа, генерируемый бекендом Web-приложения.
+                  example: 231231
+                Cargo:
+                  type: object
+                  required:
+                    - cargo_id
+                    - length
+                    - height
+                    - width
+                    - weight
+                    - declared_value
+                    - type_cargo
+                    - Address
+                    - Recipient
+                  properties:
+                    cargo_id:
+                      type: integer
+                      example: 123123
+                    length:
+                      type: number
+                      format: float
+                      example: 23.5
+                    height:
+                      type: number
+                      format: float
+                      example: 12.1
+                    width:
+                      type: number
+                      format: float
+                      example: 1.1
+                    weight:
+                      type: number
+                      format: float
+                      example: 0.89
+                    declared_value:
+                      type: number
+                      format: float
+                      example: 12423.33
+                    type_cargo:
+                      type: string
+                      example: "Хрупкий"
+                    Address:
+                      type: object
+                      required:
+                        - address_issue
+                        - address_destination
+                        - city_issue
+                        - city_destination
+                        - type_transmission_order
+                        - type_issuance_order
+                      properties:
+                        address_issue:
+                          type: string
+                          example: "Переулок Днепровский 133В кв 41"
+                        address_destination:
+                          type: string
+                          example: "Переулок Ульяновский 131В кв 49"
+                        city_issue:
+                          type: string
+                          example: "г. Ростов-на-Дону"
+                        city_destination:
+                          type: string
+                          example: "г. Ульяновск"
+                        type_transmission_order:
+                          type: string
+                          example: "ПВЗ"
+                        type_issuance_order:
+                          type: string
+                          example: "Курьер"
+                    Recipient:
+                      type: object
+                      required:
+                        - firstname_recipient
+                        - lastname_recipient
+                        - phone_recipient
+                        - email_recipient
+                      properties:
+                        firstname_recipient:
+                          type: string
+                          example: "Иванов"
+                        lastname_recipient:
+                          type: string
+                          example: "Иван"
+                        phone_recipient:
+                          type: string
+                          pattern: '^\+7\d{10}$'
+                          example: "+79044401139"
+                        email_recipient:
+                          type: string
+                          format: email
+                          example: "ivan@mail.com"
+                Tariff:
+                  type: object
+                  required:
+                    - name
+                    - modifier_type
+                  properties:
+                    name: 
+                      type: string
+                      example: "Базовый"
+                    modifier_type:
+                      type: string
+                      example: "Экспресс"
+                description:
+                  type: string
+                  maxLength: 500
+                  example: "Телефон. Будьте осторожны с ним! Вход со стороны лестницы"

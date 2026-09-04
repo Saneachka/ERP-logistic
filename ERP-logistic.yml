@@ -1,0 +1,429 @@
+openapi: 3.1.0
+info:
+  title: Web-app Logistic API
+  version: '1.0.0'
+  description: API для передачи данных создания заказа от frontend части приложения в backend часть.
+servers:
+  - url: https://web-logistic.io.ru/v1
+
+paths:
+
+  /notifications/stream:
+    get:
+      summary: SSE-соединение для отслеживания статусов и сведений по заказам
+      description: Создается соединение при успешном входе и остается до тех пор, пока не закончится время активной сессии. Сервер отправляет события с актуальными статусами заказа, грузов и оплаты.
+      tags:
+        - Notifications
+      parameters:
+        - name: session_id
+          in: cookie
+          description: Идентификатор активной сессии пользователя.
+          required: true
+          schema:
+            type: string
+            example: "sess_a1b2c3d4e5f6"
+      responses:
+        '200':
+          description: Запрос на SSE соединение успешно создан
+          content:
+            text/event-stream:
+              schema:
+                type: object
+                description: Структура каждого события в SSE-потоке
+                required:
+                  - id
+                properties:
+                  event:
+                    type: string
+                    description: Тип события
+                    enum:
+                      - order_update
+                      - system_notification
+                    example: "order_update"
+                  data:
+                    $ref: '#/components/schemas/OrderUpdateData'
+                  id:
+                    type: integer
+                    description: Уникальный идентификатор события (обязательное поле протокола SSE, используется для восстановления соединения при обрыве)
+                    example: 132124
+                  retry:
+                    type: integer
+                    description: Время в миллисекундах до попытки переподключения при обрыве соединения
+                    example: 5000
+        '401':
+          description: Пользователь не авторизован. Фронтенд должен выполнить редирект на страницу входа, используя URL из redirect_url.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error_code
+                  - message
+                  - redirect_url
+                properties:
+                  error_code:
+                    type: string
+                    example: "unauthorized"
+                  message:
+                    type: string
+                    example: "Сессия истекла или не найдена. Пожалуйста, войдите в систему."
+                  redirect_url:
+                    type: string
+                    description: URL страницы входа для редиректа.
+                    example: "/login"
+        '503':
+          description: Сервис временно недоступен (технические работы или перегрузка).
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error_code
+                  - message
+                properties:
+                  error_code:
+                    type: string
+                    example: "service_unavailable"
+                  message:
+                    type: string
+                    example: "Сервис временно недоступен, пожалуйста, попробуйте позже."
+
+  /orders/new:
+    post:
+      summary: Создание нового заказа
+      description: |
+        Создание заказа. 
+        Требует наличия активной сессии в cookie и заголовка идемпотентности для предотвращения двойных созданий при повторных запросах.
+      tags:
+        - Order
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          description: Уникальный ключ идемпотентности (UUID v4), генерируемый клиентом.
+          required: true
+          schema:
+            type: string
+            format: uuid
+            example: "123e4567-e89b-12d3-a456-426614174000"
+        - name: session_id
+          in: cookie
+          description: Идентификатор активной сессии пользователя.
+          required: true
+          schema:
+            type: string
+            example: "sess_a1b2c3d4e5f6"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderCreateRequest'
+      responses:
+        '202':
+          description: Заказ успешно зарегистрирован и принят в обработку.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderCreateResponse'
+                
+        '400':
+          description: Неверный формат запроса или отсутствуют обязательные поля.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error_code
+                  - message
+                properties:
+                  error_code:
+                    type: string
+                    example: "Bad Reqest"
+                  message:
+                    type: string
+                    example: "Отсутствуют обязательные поля в запросе"
+                  details:
+                    type: array
+                    description: Список конкретных полей с ошибками валидации.
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                          example: "Orders[0].Cargo.weight"
+                        issue:
+                          type: string
+                          example: "Значение должно быть больше 0"
+
+        '401':
+          description: Пользователь не авторизован. Фронтенд должен выполнить редирект на страницу входа, используя URL из redirect_url.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error_code
+                  - message
+                  - redirect_url
+                properties:
+                  error_code:
+                    type: string
+                    example: "Unauthorized"
+                  message:
+                    type: string
+                    example: "Сессия истекла или не найдена. Пожалуйста, войдите в систему."
+                  redirect_url:
+                    type: string
+                    description: URL страницы входа для редиректа.
+                    example: "/login"
+
+        '403':
+          description: Пользователь авторизован, но профиль заполнен не полностью. Фронтенд должен выполнить редирект на страницу дополнения профиля.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error_code
+                  - message
+                  - redirect_url
+                properties:
+                  error_code:
+                    type: string
+                    example: "Forbidden"
+                  message:
+                    type: string
+                    example: "Для оформления заказа необходимо заполнить данные в личном кабинете."
+                  redirect_url:
+                    type: string
+                    description: URL страницы личного кабинета для дополнения данных.
+                    example: "/profile/complete"
+
+        '503':
+          description: Сервис временно недоступен (технические работы или перегрузка).
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error_code
+                  - message
+                properties:
+                  error_code:
+                    type: string
+                    example: "Service Unvailable"
+                  message:
+                    type: string
+                    example: "Сервис временно недоступен, пожалуйста, попробуйте позже."
+
+components:
+  schemas:
+    OrderStatusEnum:
+      type: string
+      enum:
+        - "Зарегистрирован"
+        - "Оформлен"
+        - "Подтвержден"
+        - "В транзите"
+        - "Доставлен"
+        - "Отменен"
+
+    CargoStatusEnum:
+      type: string
+      enum:
+        - "Принят на складе"
+        - "Погружен"
+        - "В транзите"
+        - "Доставлен"
+        - "Поврежден"
+        - "Утерян"
+
+    PaymentStatusEnum:
+      type: string
+      enum:
+        - "Ожидает оплаты"
+        - "Оплачен"
+        - "Возврат"
+        - "Ошибка"
+
+    OrderUpdateData:
+      type: object
+      description: |
+        Данные события об обновлении заказа. 
+        Все поля необязательны — сервер отправляет только те, которые изменились в момент события.
+      properties:
+        order_id:
+          type: integer
+          description: ID заказа, по которому пришло обновление
+          example: 12341
+        order_status:
+          $ref: '#/components/schemas/OrderStatusEnum'
+        payment_status:
+          $ref: '#/components/schemas/PaymentStatusEnum'
+        total_amount:
+          type: number
+          format: float
+          description: Итоговая стоимость заказа (передается, если она была рассчитана или изменилась)
+          example: 1500.5
+        cargoes:
+          type: array
+          description: Список грузов внутри заказа с их статусами
+          items:
+            $ref: '#/components/schemas/CargoUpdateItem'
+
+    CargoUpdateItem:
+      type: object
+      description: Обновление статуса конкретного груза внутри заказа
+      properties:
+        cargo_id:
+          type: integer
+          description: ID груза, к которому относится изменение статуса
+          example: 98765
+        cargo_status:
+          $ref: '#/components/schemas/CargoStatusEnum'
+
+    # --- Схемы для создания заказа ---
+    OrderCreateRequest:
+      type: object
+      required:
+        - Orders
+      properties:
+        Orders:
+          type: array
+          description: Массив объектов груза, принадлежащих данному заказу.
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderItem'
+
+    OrderItem:
+      type: object
+      required:
+        - Cargo
+        - Tariff
+      properties:
+        Cargo:
+          $ref: '#/components/schemas/Cargo'
+        Tariff:
+          $ref: '#/components/schemas/Tariff'
+        description:
+          type: string
+          maxLength: 500
+          example: "Телефон. Будьте осторожны с ним! Вход со стороны лестницы"
+
+    Cargo:
+      type: object
+      required:
+        - length
+        - height
+        - width
+        - weight
+        - declared_value
+        - type_cargo
+        - Address
+        - Recipient
+      properties:
+        length:
+          type: number
+          format: float
+          example: 23.5
+        height:
+          type: number
+          format: float
+          example: 12.1
+        width:
+          type: number
+          format: float
+          example: 1.1
+        weight:
+          type: number
+          format: float
+          example: 0.89
+        declared_value:
+          type: number
+          format: float
+          example: 12423.33
+        type_cargo:
+          type: string
+          example: "Хрупкий"
+        Address:
+          $ref: '#/components/schemas/Address'
+        Recipient:
+          $ref: '#/components/schemas/Recipient'
+
+    Address:
+      type: object
+      required:
+        - address_issue
+        - address_destination
+        - city_issue
+        - city_destination
+        - type_transmission_order
+        - type_issuance_order
+      properties:
+        address_issue:
+          type: string
+          example: "Переулок Днепровский 133В кв 41"
+        address_destination:
+          type: string
+          example: "Переулок Ульяновский 131В кв 49"
+        city_issue:
+          type: string
+          example: "г. Ростов-на-Дону"
+        city_destination:
+          type: string
+          example: "г. Ульяновск"
+        type_transmission_order:
+          type: string
+          example: "ПВЗ"
+        type_issuance_order:
+          type: string
+          example: "Курьер"
+
+    Recipient:
+      type: object
+      required:
+        - firstname_recipient
+        - lastname_recipient
+        - phone_recipient
+        - email_recipient
+      properties:
+        firstname_recipient:
+          type: string
+          example: "Иванов"
+        lastname_recipient:
+          type: string
+          example: "Иван"
+        phone_recipient:
+          type: string
+          pattern: '^\+7\d{10}$'
+          example: "+79044401139"
+        email_recipient:
+          type: string
+          format: email
+          example: "ivan@mail.com"
+
+    Tariff:
+      type: object
+      required:
+        - name
+        - modifier_type
+      properties:
+        name: 
+          type: string
+          example: "Базовый"
+        modifier_type:
+          type: string
+          example: "Экспресс"   
+
+    OrderCreateResponse:
+      type: object
+      required:
+        - message
+        - order_id
+      properties:
+        order_id:
+          type: integer
+          example: 12341
+        message:
+          type: string
+          example: "Заказ зарегистрирован. Производится расчет стоимости."
